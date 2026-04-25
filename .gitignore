@@ -1,0 +1,9 @@
+./__pycache__/*
+./.vscode/*
+hotspotQA_distractor/__pycache__/*
+hotspotQA_fullwiki/__pycache__/*
+hotspotQA_distractor/*.json
+hotspotQA_fullwiki/*.json
+hotspotQA_fullwiki/pyserini/*
+hotspotQA_fullwiki/hotspot_chromadb/* 
+enwiki-20171001-pages-meta-current-withlinks-processed.tar.bz2
