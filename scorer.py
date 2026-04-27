@@ -58,18 +58,18 @@ def get_f1_for_supporting_facts(pred_sf, actual_sf):
      
     tp = 0
     ap = 0
-    for k, actual_sent_ids in actual_sf.items():
-        set_actual_sent_ids = set(actual_sent_ids)
+    for k, actual_sentences in actual_sf.items():
+        set_actual_sentences = set(actual_sentences)
         if k in pred_sf:
-            set_pred_sent_ids = set(pred_sf[k])
-            inter = (set_pred_sent_ids).intersection(set_actual_sent_ids)
+            (set_pred_sentences) = set(pred_sf[k])
+            inter = (set_pred_sentences).intersection(set_actual_sentences)
             tp+=len(inter)
-        ap+=len(set_actual_sent_ids)
+        ap+=len(set_actual_sentences)
     
     pp = 0
-    for k, pred_sent_ids in pred_sf.items():
-        set_pred_sent_ids = set(pred_sent_ids)
-        pp+=len(set_pred_sent_ids)
+    for k, pred_sentences in pred_sf.items():
+        (set_pred_sentences) = set(pred_sentences)
+        pp+=len(set_pred_sentences)
 
     recall = tp/ap
 
@@ -110,18 +110,23 @@ def get_score(hotspotQA_results):
     return answers_em_sum/n, answers_f1_sum/n, supporting_facts_em_sum/n, supporting_facts_f1_sum/n
 
 
-SINGLE_HOP_NO_CONTEXT = 'hotspotQA_distractor/single_hop_with_no_context_results.json'
+SINGLE_HOP_NO_CONTEXT = 'baseline/results/single_hop_with_no_context_results.json'
 
-MULTI_HOP_WITH_CONTEXT = 'hotspotQA_distractor/multi_hop_results.json'
+MULTI_HOP_WITH_CONTEXT = 'baseline/results/multi_hop_results.json'
 
-SINGLE_HOP_WITH_CONTEXT = 'hotspotQA_distractor/single_hop_results.json'
+SINGLE_HOP_WITH_CONTEXT = 'baseline/results/single_hop_results.json'
 
-PYSERINI_CONTEXT_WITH_MULTI_HOP = 'hotspotQA_fullwiki/pyserini_based_query_results.json'
+PYSERINI_CONTEXT_WITH_MULTI_HOP = 'pyserini/pyserini_based_query_results.json'
+
+SENTENCE_TRANSFORMERS_MULTI_HOP = 'sentence_transformers/sentence_transformers_based_results.json'
+
+
 
 files = {'single_hop_no_context': SINGLE_HOP_NO_CONTEXT, 
          'single_hop_with_context':SINGLE_HOP_WITH_CONTEXT, 
          'multi_hop_refinement': MULTI_HOP_WITH_CONTEXT, 
-         'pyserini_based_multi_hop': PYSERINI_CONTEXT_WITH_MULTI_HOP
+         'pyserini_based_multi_hop': PYSERINI_CONTEXT_WITH_MULTI_HOP,
+         'sentence_transformers_multi_hop' : SENTENCE_TRANSFORMERS_MULTI_HOP
          }
 
 for method, file in files.items():
@@ -129,7 +134,26 @@ for method, file in files.items():
         answer_em, answer_f1,supporting_facts_em, supporting_facts_f1 =  get_score(json.load(f))
         print(f"""method:{method} answer_em : {answer_em}, answer_f1 : {answer_f1},  supporting_facts_em : {supporting_facts_em}', 
               supporting_facts_f1 : {supporting_facts_f1}""")
-        
+
+from pathlib import Path
+import polars as pl 
+import os
+
+
+
+
+def write_train_data(train_data_path, distractor_input_json_path, fullwiki_input_json_path):
+    df = pl.read_ipc_stream(train_data_path)
+
+    filtered_df = df.filter(pl.col("level") == "hard").sample(n=200, seed=42)    
+
+    if not os.path.exists(distractor_input_json_path):
+        filtered_df.to_pandas().to_csv(distractor_input_json_path, index=False)
+    
+    if not os.path.exists(fullwiki_input_json_path):
+        filtered_df.to_pandas().to_csv(fullwiki_input_json_path, index=False)
+
+    context = filtered_df['context'].to_list()
 
 
 

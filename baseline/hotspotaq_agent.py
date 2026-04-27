@@ -11,7 +11,7 @@ import os
 import time
 from datetime import timedelta
 
-with open(commons.TRAIN_DATA_PATH, 'r') as fp:
+with open(commons.TEST_DATA_PATH, 'r', encoding='utf-8') as fp:
     hotspotQA_train_data = json.load(fp) 
 
                           
@@ -36,7 +36,6 @@ class HotSpotQA(TypedDict):
     question_id: str
 
 
-
 def get_context(context):
     titles = context['title']
     sentences = context['sentences']
@@ -51,15 +50,20 @@ def get_context(context):
     
     return title_sentences_map
 
-def get_supporting_facts(supporting_facts):
+
+def get_supporting_facts(supporting_facts, actual_context):
     titles = supporting_facts['title']
     sentence_ids = supporting_facts['sent_id']
     supporting_facts_map = {}
     for title, sentence_id in zip(titles, sentence_ids):
-        sentence_id_str = f'{sentence_id}'
+        pos = actual_context['title'].index(title)
+        sentence = actual_context['sentences'][pos][sentence_id]
+        
         if title not in supporting_facts_map:
             supporting_facts_map[title] = []
-        supporting_facts_map[title].append(sentence_id_str)
+        
+        supporting_facts_map[title].append(sentence)
+        
     
     return supporting_facts_map
 
@@ -68,7 +72,7 @@ def query_llm(state:HotSpotQA):
     message = [
         {'role' : 'system', 'content' : commons.BASE_PROMPT},
         {'role' : 'user', 'content': commons.get_query_prompt_with_context(state['question'], state['context'], 
-                                                             state['prev_resp_comments'], state['provide_answer'])}
+                                                state['prev_resp_comments'], state['provide_answer'])}
     ]
     res = llm.invoke(message)
     return {'raw_response':res.content}
@@ -76,7 +80,8 @@ def query_llm(state:HotSpotQA):
 def query_llm_with_no_context(state:HotSpotQA):
     message = [
         {'role' : 'system', 'content' : commons.NO_CONTEXT_PROMPT},
-        {'role' : 'user', 'content': commons.get_query_prompt_without_context(state['question'], state['prev_resp_comments'])}
+        {'role' : 'user', 'content': commons.get_query_prompt_without_context(
+            state['question'], state['prev_resp_comments'])}
     ]
     res = llm.invoke(message)
     return {'raw_response':res.content}
@@ -172,6 +177,20 @@ def write_retries_maxed_hotspotQA_to_file(state:HotSpotQA):
             json.dump([state], f, indent=4)
 
 
+def convert_sent_ids_to_sentence(state:HotSpotQA):
+    pred_supporting_facts = state['pred_supporting_facts']
+    converted_prediction_map = {}
+    for title, sentences_id in pred_supporting_facts.items():
+        pred_sentences = []
+        sentences = state['context'][title]
+        for sentence_id in sentences_id:
+            sentence = sentences[sentence_id]
+            pred_sentences.append(sentence)
+        converted_prediction_map[title] = pred_sentences
+
+    return {'pred_supporting_facts': converted_prediction_map}
+
+
 
 def run_single_hop():
 
@@ -181,9 +200,13 @@ def run_single_hop():
     graph.add_node('write_retries_maxed_hotspotQA_to_file', write_retries_maxed_hotspotQA_to_file)
     graph.add_node('validate_answer', validate_answer)
 
+    graph.add_node('convert_ids_to_sentences', convert_sent_ids_to_sentence)
+
     graph.set_entry_point('get_answer')
     graph.add_edge('get_answer', 'validate_supporting_facts')
     graph.add_edge('write_retries_maxed_hotspotQA_to_file', END)
+
+  
    
 
 
@@ -194,8 +217,10 @@ def run_single_hop():
     graph.add_conditional_edges('validate_answer', check_answer, {
         'retry': 'get_answer',
         'retry_maxed': 'write_retries_maxed_hotspotQA_to_file',
-        'end': END
+        'end': 'convert_ids_to_sentences'
     })
+
+    graph.add_edge('convert_ids_to_sentences', END)
 
     app = graph.compile()
 
@@ -214,7 +239,7 @@ def run_single_hop():
             'question' : train_data['question'],
             'context': get_context(train_data['context']),
             'actual_answer' : train_data['answer'],
-            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts']),
+            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts'], train_data['context']),
             'prev_resp_comments' : [],
             'resp_answer': '',
             'resp_supporting_facts': {},
@@ -229,10 +254,10 @@ def run_single_hop():
         res = app.invoke(state)
         end = time.perf_counter()
 
-        matched = True
+        matched = False
         if res['pred_answer'].lower() == res['actual_answer'].lower():
             answers_matched+=1
-            matched = False
+            matched = True
         
         if res['pred_supporting_facts'].keys() == res['actual_supporting_facts'].keys():
             supporting_facts_keys_matched+=1
@@ -278,9 +303,10 @@ def run_multi_hop():
     graph.add_node('write_retries_maxed_hotspotQA_to_file', write_retries_maxed_hotspotQA_to_file)
     graph.add_node('update_context_with_prev_supporting_facts', update_context_with_prev_supporting_facts)
     graph.add_node('validate_answer', validate_answer)
-
-
+    
     graph.add_node('get_answer', query_llm)
+
+    graph.add_node('convert_ids_to_sentences', convert_sent_ids_to_sentence)
 
     graph.set_entry_point('get_context_for_reasoning')
     graph.add_edge('get_context_for_reasoning', 'validate_supporting_facts')
@@ -300,8 +326,10 @@ def run_multi_hop():
     graph.add_conditional_edges('validate_answer', check_answer, {
         'retry': 'get_answer',
         'retry_maxed': 'write_retries_maxed_hotspotQA_to_file',
-        'end': END
+        'end': 'convert_ids_to_sentences'
     })
+
+    graph.add_edge('convert_ids_to_sentences', END)
 
     app = graph.compile()
 
@@ -318,7 +346,7 @@ def run_multi_hop():
             'question' : train_data['question'],
             'context': get_context(train_data['context']),
             'actual_answer' : train_data['answer'],
-            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts']),
+            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts'], train_data['context']),
             'prev_resp_comments' : [],
             'resp_answer': '',
             'resp_supporting_facts': {},
@@ -332,10 +360,10 @@ def run_multi_hop():
 
         res = app.invoke(state)
         end = time.perf_counter()
-        matched = True
+        matched = False
         if res['pred_answer'].lower() == res['actual_answer'].lower():
             answers_matched+=1
-            matched = False
+            matched = True
         
         if res['pred_supporting_facts'].keys() == res['actual_supporting_facts'].keys():
             supporting_facts_keys_matched+=1
@@ -419,10 +447,10 @@ def run_single_hop_with_co_context():
 
         res = app.invoke(state)
         end = time.perf_counter()
-        matched = True
+        matched = False
         if res['pred_answer'].lower() == res['actual_answer'].lower():
             answers_matched+=1
-            matched = False
+            matched = True
         
         if res['pred_supporting_facts'].keys() == res['actual_supporting_facts'].keys():
             supporting_facts_keys_matched+=1
@@ -461,12 +489,13 @@ def run_single_hop_with_co_context():
 
 
 
+api_key = os.getenv('OPEN-ROUTER-API-KEY')
+
 llm = ChatOpenRouter(
   model="qwen/qwen3-32b",
-  api_key=SecretStr("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"),
+  api_key=api_key, # type: ignore
   temperature=0
 )
-
 
 run_single_hop()
 

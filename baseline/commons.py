@@ -21,6 +21,7 @@ Input is the following format {json.dumps(input)}.
     values are key value pairs, where
         - The keys represent the sentence ids.
         - The value represent the actual sentence.
+    -The context includes distractor sentences as well.
 'prev_resp_comments':
     - If 'prev_resp_comments' is not empty, it means prev iteration had some errors.
     - Identify what was wrong
@@ -30,12 +31,6 @@ Input is the following format {json.dumps(input)}.
     - If 'provide_answer' is true, it means you should provide an answer in this iteration.
     - If 'provide_answer' is false, it means you should not provide an answer in this iteration and 
     only focus on providing supporting facts.
-
-REASONING:
--You must reason with only  the provided 'context'.
--You must identify and combine information from multiple sentence if needed.
--You must Analyze all the titles and sentences in the context before answering. 
--Do not answer based on partial analysis.
 OUTPUT:
 output must be strictly in the following format {json.dumps(output)}.
 'answer':
@@ -47,7 +42,6 @@ output must be strictly in the following format {json.dumps(output)}.
     - If the answer is derieved from multiple sentences in the context, 
         you can combine the relevant sentences verbatim to form the answer. 
     - Do not leave this field empty when 'provide_answer' is 'true'. 
-        You must provide an answer when 'provide_answer' is 'true'. 
 'supporting_facts':
     -The keys are the titles from the context that lead to the answer.
     -The values are those corresponding titles sentence ids.
@@ -56,6 +50,14 @@ output must be strictly in the following format {json.dumps(output)}.
         Do not invent titles and sentence ids.
     -You must provide  all the titles and sentence ids that are needed to reason and answer the question.
         Do not leave any.
+REASONING:
+-You must reason with only  the provided 'context'.
+-You must identify and combine information from multiple sentence if needed.
+-You must Analyze all the titles and sentences in the context before answering. 
+-Do not answer based on partial analysis.
+-Identify and eliminate all distractor sentences in the 'context'.
+-Restrict reasoning to relevant titles and sentences only.
+-Connecting the relevant sentences and removing the noise is the most critical part.
 
 No conversations. No thinking out loud.
 Internally reason step-by-step, but do not output reasoning.
@@ -116,15 +118,15 @@ INVALID_JSON_FORMAT_PROMPT = 'Response is not a valid json. Please ensure your r
 
 MAX_RETRIES = 5
 
-BASE_PATH = 'hotspotQA_distractor'
+BASE_PATH = 'baseline'
 
 RETRIES_MAXED_FILE_PATH = f'{BASE_PATH}/retries_maxed_hotspotQA.json'
 
-SINGLE_HOP_RESULTS_FILE_PATH = f'{BASE_PATH}/single_hop_results.json'
+SINGLE_HOP_RESULTS_FILE_PATH = f'{BASE_PATH}/results/single_hop_results.json'
 
-MULTI_HOP_RESULTS_FILE_PATH = f'{BASE_PATH}/multi_hop_results.json'
+MULTI_HOP_RESULTS_FILE_PATH = f'{BASE_PATH}/results/multi_hop_results.json'
 
-SINGLE_HOP_WITH_NO_CONTEXT_RESULTS_FILE_PATH = f'{BASE_PATH}/single_hop_with_no_context_results.json'
+SINGLE_HOP_WITH_NO_CONTEXT_RESULTS_FILE_PATH = f'{BASE_PATH}/results/single_hop_with_no_context_results.json'
 
-TRAIN_DATA_PATH = f'{BASE_PATH}/train.json'
+TEST_DATA_PATH = f'test.json'
 

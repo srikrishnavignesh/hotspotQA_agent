@@ -1,5 +1,6 @@
 import json
 
+
 context = {'title a':{'0': 'sentence'}, 'title b':{'0': 'sentence'}}
 input = {'question':'', 'context':context, 'prev_resp_comments':'', 'provide_answer': ''}
 output = {'answer':'', 'supporting_facts':{'title a':[], 'title b':[]}, "context_needed": []}
@@ -8,7 +9,7 @@ output = {'answer':'', 'supporting_facts':{'title a':[], 'title b':[]}, "context
 BASE_PROMPT = f"""
 You are a precise question-answering assistant.
 INPUT_FORMAT:
-Input is the following format {json.dumps(input, ensure_ascii=False)}.
+Input is in the following format {json.dumps(input, ensure_ascii=False)}.
 'question:'
     We have a single question.
 'context':
@@ -26,42 +27,52 @@ Input is the following format {json.dumps(input, ensure_ascii=False)}.
 'provide_answer':
     - If 'provide_answer' is true, it means you should provide an answer in this iteration.
     - If 'provide_answer' is false, it means you should not provide an answer in this iteration and 
-    only focus on providing supporting facts.
+    only focus on providing 'supporting_facts'.
 
 OUTPUT:
 output must be strictly in the following format {json.dumps(output, ensure_ascii=False)}.
 'answer':
     - Do not provide explanations. Only provide the answer. No conversations. No thinking out loud.
+      No introductory text or conversations fillers.
     - If the answer is 'yes' or 'no', return exactly that.
         Otherwise use the verbatim from the context that answers the question.
     - If the answer is derieved from multiple sentences in the context, 
         you can combine the relevant sentences verbatim to form the answer.
+    - If context is not sufficient to come up with an answer, return 'insufficient context'
 'supporting_facts':
     -The keys are the titles from the context that leads and progresses to the answer.
     -The values are those corresponding titles sentence ids.
     -You must strictly only include titles and sentence ids from the 'context' that lead to the
-        answer. You must not include random or arbitrary titles and sentence ids.
-        Do not invent titles and sentence ids.
+     answer. You must not include random or arbitrary titles and sentence ids.
+     Do not invent titles and sentence ids.
     -You must provide all the titles and sentence ids that are needed to reason and answer the question.
      Do not leave any.
 'context_needed':
     - You must use this field to identify any missing information that is needed to answer the question 
-        when the provided context is insufficient.
-    - Provide a list of precise and complete Wikipedia-style titles required to answer the question.
-    - Each title must be:
-        • Fully qualified and unambiguous (include disambiguation if needed, e.g., "Titanic (1997 film)")
-    - Do NOT provide generic queries or partial phrases  (e.g., avoid "Titanic", "war history") and 
-      prefer exact entity names(person, place, event, film, book, etc.)
-    - The titles should be directly usable for retrieval (e.g., BM25 search).
-    - If sufficient information is already present in the context, return an empty list.
-    - When 'provide_answer' is true, this field must be an empty list.
-    - You can provide atmost 3 titles in this field.
+      when the provided context is insufficient.
+    - You must come up with context rich queries to derieve the answer.
+    - The queries will be used to retrieve data from the vector db.
+    - You can provide atmost 3 queries in this field.
+    - Avoid generic queries 
+     
+     'Bad Queries'-
+     'Who is Donald Trump?' or 'When was Einstein born?' or '26/11 Mumbai Terror Attack'.
+
+     'Good Queries'-
+     'Donald Trump the president of united states of America'.
+     'when was Einstein the famous physict, who introduced the ideas of general relativity and Mass-Energy equivalence born?'.
+     'Terror Attack in Mumbai,India on september 26 2008 on places like Nariman House, Taj Hotel by 
+      Lashkar-e-Taiba (terrorist organization).'
+
+    You must never provide existing context or given question as part of the 'context_needed'.
+      
+      Adding better relevant contexts leads to better queries.
+
+    - Return empty context if provided context is sufficient to asnwer the question.
 
 
-MAIN NON NEGOTIABLE
--Do not provide explanation or introductory text or conversations fillers or mention reasonings.
-Provide the dirct answer in 'answer' field.
 -REASONING:
+    -reasoning is internal only. Do not include it in output.
     -Identify and eliminate all distractor sentences in the 'context'.
     -Restrict reasoning to relevant titles and sentences only.
     -Perform answer derivation on filtered context.
@@ -69,10 +80,7 @@ Provide the dirct answer in 'answer' field.
     from just one single sentence, So you must focus on connecting relevant sentences from multiple titles 
     to answer the question.
     -Connecting the relevant sentences and removing the noise is the most critical part.
-    -If 'answer' is True and 'context' is not sufficient to give answer, provide 'insufficient context' in the answer.
--Titles already present in the 'context' must not be repeated in 'context_needed'.
 """
-
 
 
 def get_query_prompt_with_context(question, context, prev_resp_comments, provide_answer):
@@ -80,7 +88,6 @@ def get_query_prompt_with_context(question, context, prev_resp_comments, provide
              'provide_answer': provide_answer}
     return json.dumps(input, ensure_ascii=False)
 
-INVALID_JSON_FORMAT_PROMPT = 'Response is not a valid json. Please ensure your response strictly follows the output format.'
 
 def get_invalid_sentence_ids_prompt(title, invalid_sentence_ids):
  return f"""
@@ -103,21 +110,30 @@ def get_no_answer_in_respone_prompt():
    return f"""
             The response is missing the 'answer' field. You must ensure that your response has a valid 'answer' if the
             'provide_answer' field is True. You must honour this strictly.
-          """
+            """
 
-TOP_K_RETRIEVAL = 2
 
-BASE_PATH = 'hotspotQA_fullwiki'
 
-TRAIN_DATA_PATH = f"{BASE_PATH}/train.json"
 
-RETRIES_MAXED_FILE_PATH = f'{BASE_PATH}/retries_maxed_hotspotQA.json'
+CHROMADB_PATH = 'sentence_transformers/chromadb'
+CHROMADB_COLLECTION_NAME = 'hotspotQA'
+
+TEST_DATA_PATH = 'test.json'
+
+SENTENCE_TRANSFORMERS_BASED_RESULTS = 'sentence_transformers/sentence_transformers_based_results.json'
+
+TOP_K_RETRIEVAL = 7
+
+
+RETRIES_MAXED_FILE_PATH = 'sentence_transformers/retries_maxed_hotspotQA.json'
 
 MAX_RETRIES = 5
 
-PYSERSINI_BASED_QUERY_RESULTS_FILE_PATH = f'{BASE_PATH}/pyserini_based_query_results.json'
 
 MAX_ITERATIONS = 3
 
-PYSERINI_DOCS_FILE_LOC = f'{BASE_PATH}/pyserini/docs'
-PYSERINI_INDEX_FILE_DOX = f'{BASE_PATH}/pyserini/index'
+
+INPUT_DATA = 'input.json'
+
+INVALID_JSON_FORMAT_PROMPT = 'Response is not a valid json. Please ensure your response strictly follows the output format.'
+

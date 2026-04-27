@@ -1,1 +1,14 @@
 data-00000-of-00002.arrow filter=lfs diff=lfs merge=lfs -text
+pyserini/pyserini_based_query_results.json filter=lfs diff=lfs merge=lfs -text
+pyserini/retries_maxed_hotspotQA.json filter=lfs diff=lfs merge=lfs -text
+input.json filter=lfs diff=lfs merge=lfs -text
+test.json filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/retries_maxed_hotspotQA.json filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/sentence_transformers_based_results.json filter=lfs diff=lfs merge=lfs -text
+json_l_docs/* filter=lfs diff=lfs merge=lfs -text
+pyserini/index/* filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/chromadb/* filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/data_and_embeddings/* filter=lfs diff=lfs merge=lfs -text
+baseline/retries_maxed_hotspotQA.json filter=lfs diff=lfs merge=lfs -text
+baseline/results/* filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/chromadb/5d768e72-be7e-41bc-839a-f1b29b91ee4d/* filter=lfs diff=lfs merge=lfs -text

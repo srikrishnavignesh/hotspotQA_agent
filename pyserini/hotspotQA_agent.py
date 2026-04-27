@@ -13,8 +13,8 @@ import os
 from datetime import timedelta
 import time
 
-with open(commons.TRAIN_DATA_PATH, 'r') as fp:
-    hotspotQA_train_data = json.load(fp) 
+with open(commons.TEST_DATA_PATH, 'r', encoding='utf-8') as fp:
+    hotspotQA_test_data = json.load(fp) 
 
 searcher = LuceneSearcher(commons.PYSERINI_INDEX_FILE_DOX)
 
@@ -49,13 +49,13 @@ def build_context(titles):
         hits = searcher.search(title, k=commons.TOP_K_RETRIEVAL)
         for hit in hits:
             raw = json.loads(searcher.doc(hit.docid).raw()) # type: ignore
+            title = raw['id']
             contents = raw['contents']
             
-            sentences = contents.split('(sentence-ends)')
-            title = sentences[0]
+            sentences = contents.split('\n')
             
             sentence_id_map = {}
-            for indx,sentence in enumerate(sentences[1:]):
+            for indx,sentence in enumerate(sentences):
                 sentence_id = f'{indx}'
                 sentence_id_map[sentence_id] = sentence
             
@@ -63,15 +63,19 @@ def build_context(titles):
     
     return title_sentences_map
 
-def get_supporting_facts(supporting_facts):
+def get_supporting_facts(supporting_facts, actual_context):
     titles = supporting_facts['title']
     sentence_ids = supporting_facts['sent_id']
     supporting_facts_map = {}
     for title, sentence_id in zip(titles, sentence_ids):
-        sentence_id_str = f'{sentence_id}'
+        pos = actual_context['title'].index(title)
+        sentence = actual_context['sentences'][pos][sentence_id]
+        
         if title not in supporting_facts_map:
             supporting_facts_map[title] = []
-        supporting_facts_map[title].append(sentence_id_str)
+        
+        supporting_facts_map[title].append(sentence)
+        
     
     return supporting_facts_map
 
@@ -138,7 +142,6 @@ def validate_response(state:HotSpotQA):
 
 def update_context(state:HotSpotQA):
 
-    
     context_needed = state['context_needed']
     new_context = {}
     if context_needed:
@@ -191,6 +194,21 @@ def check_state(state:HotSpotQA):
     else:
         return 'query'
 
+def convert_sent_ids_to_sentence(state:HotSpotQA):
+    pred_supporting_facts = state['pred_supporting_facts']
+    converted_prediction_map = {}
+    for title, sentences_id in pred_supporting_facts.items():
+        pred_sentences = []
+        sentences = state['context'][title]
+        for sentence_id in sentences_id:
+            sentence = sentences[sentence_id]
+            pred_sentences.append(sentence)
+        converted_prediction_map[title] = pred_sentences
+
+    return {'pred_supporting_facts': converted_prediction_map}
+
+
+
 
 def run_with_pyserini():
 
@@ -198,6 +216,8 @@ def run_with_pyserini():
     graph.add_node('query', query_llm)
     graph.add_node('validate_response', validate_response)
     graph.add_node('add_query_context', update_context)
+    graph.add_node('convert_sent_ids_to_sentence', convert_sent_ids_to_sentence)
+
 
     graph.add_node('move_state_fwd', move_state_fwd)
 
@@ -206,6 +226,8 @@ def run_with_pyserini():
     graph.set_entry_point('query')
 
     graph.add_edge('query', 'validate_response')
+
+
 
     graph.add_conditional_edges('validate_response', is_reponse_proper, {
         'retry':'query','retry_maxed':'write_retries_maxed_hotspotQA_to_file',
@@ -216,39 +238,40 @@ def run_with_pyserini():
     graph.add_edge('add_query_context', 'move_state_fwd')
 
     graph.add_conditional_edges('move_state_fwd', check_state, {
-        'query':'query','end':END
+        'query':'query','end':'convert_sent_ids_to_sentence'
         }
     )
 
     graph.add_edge('write_retries_maxed_hotspotQA_to_file', END)
 
-    
+    graph.add_edge('convert_sent_ids_to_sentence', END)
 
+    
     app = graph.compile()
 
-    answer_mismatched = []
-    supporting_facts_mismatched = []
+    answer_matched = 0
+    supporting_facts_matched = 0
     time_sum = timedelta(seconds=0)
     retry_sum = 0
     
-    n = len(hotspotQA_train_data)
+    n = len(hotspotQA_test_data)
    
     print('running pyserini based QA')
     observations = []
-    for indx, train_data in enumerate(hotspotQA_train_data):
+    for indx, test_data in enumerate(hotspotQA_test_data):
         start = time.perf_counter()
         state : HotSpotQA = {
-            'question' : train_data['question'],
+            'question' : test_data['question'],
             'context': {},
-            'actual_answer' : train_data['answer'],
-            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts']),
+            'actual_answer' : test_data['answer'],
+            'actual_supporting_facts': get_supporting_facts(test_data['supporting_facts'], test_data['context']),
             'prev_resp_comments' : [],
             'raw_response':'',
             'retry_count': 0,
             'pred_answer': '',
             'pred_supporting_facts' : {},
             'provide_answer': False,
-            'question_id': train_data['id'],
+            'question_id': test_data['id'],
             'context_needed':[],
             'iteration':1,
             'response_proper' : False
@@ -256,13 +279,13 @@ def run_with_pyserini():
 
         res = app.invoke(state)
         end = time.perf_counter()
-        matched = True
-        if res['pred_answer'].lower() != res['actual_answer'].lower():
-            answer_mismatched.append(state)
-            matched = False
+        matched = False
+        if res['pred_answer'].lower() == res['actual_answer'].lower():
+            answer_matched+=1
+            matched = True
         
-        if res['pred_supporting_facts'].keys() != res['actual_supporting_facts'].keys():
-            supporting_facts_mismatched.append(state)
+        if res['pred_supporting_facts'].keys() == res['actual_supporting_facts'].keys():
+            supporting_facts_matched+=1
         
         observation =  {'index' : indx, 'question_id': res['question_id'], 'actual_answer' : res['actual_answer'], 
                         'pred_answer' : res['pred_answer'], 'actual_supporting_facts': res['actual_supporting_facts'], 
@@ -280,8 +303,8 @@ def run_with_pyserini():
 
     metrics = {'metrics': 
                 {
-                    'n' : n, 'exact_matched_answers' : n - len(answer_mismatched),
-                    'exact_matched_doc_keys' : n - len(supporting_facts_mismatched),
+                    'n' : n, 'exact_matched_answers' : answer_matched,
+                    'exact_matched_doc_keys' : supporting_facts_matched,
                     'avg_time_in_seconds' : time_sum.total_seconds() / n, 'retry_count' : retry_sum / n,
                     'total_time_taken_in_seconds' : time_sum.total_seconds(),'total_retry_count' : retry_sum
                 }
@@ -295,10 +318,11 @@ def run_with_pyserini():
         json.dump(observations, f, ensure_ascii=False, indent=2)
 
 
+api_key = os.getenv('OPEN-ROUTER-API-KEY')
 
 llm = ChatOpenRouter(
   model="qwen/qwen3-32b",
-  api_key=SecretStr("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"),
+  api_key=api_key, # type: ignore
   temperature=0
 )
 
