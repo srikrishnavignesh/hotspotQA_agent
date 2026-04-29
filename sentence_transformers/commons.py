@@ -3,7 +3,7 @@ import json
 
 context = {'title a':{'0': 'sentence'}, 'title b':{'0': 'sentence'}}
 input = {'question':'', 'context':context, 'prev_resp_comments':'', 'provide_answer': ''}
-output = {'answer':'', 'supporting_facts':{'title a':[], 'title b':[]}, "context_needed": []}
+output = {'answer':'', 'supporting_facts':{'title a':[], 'title b':[]}, 'context_needed': []}
 
 
 BASE_PROMPT = f"""
@@ -45,8 +45,9 @@ output must be strictly in the following format {json.dumps(output, ensure_ascii
     -You must strictly only include titles and sentence ids from the 'context' that lead to the
      answer. You must not include random or arbitrary titles and sentence ids.
      Do not invent titles and sentence ids.
-    -You must provide all the titles and sentence ids that are needed to reason and answer the question.
+    -You must provide all the titles and sentence ids that are needed to justify the answer.
      Do not leave any.
+    -Looking just at the facts we must be able to answer the question with zero doubtfulness.
 'context_needed':
     - You must use this field to identify any missing information that is needed to answer the question 
       when the provided context is insufficient.
@@ -112,6 +113,11 @@ def get_no_answer_in_respone_prompt():
             'provide_answer' field is True. You must honour this strictly.
             """
 
+def get_invalid_answer_specs():
+   return f"""
+           You must provide 'answer', only if 'provide_answer' is True, other provide only the 'supporting_facts'.
+           """
+
 
 
 
@@ -122,13 +128,19 @@ TEST_DATA_PATH = 'test.json'
 
 SENTENCE_TRANSFORMERS_BASED_RESULTS = 'sentence_transformers/sentence_transformers_based_results.json'
 
-TOP_K_RETRIEVAL = 7
+HYBRID_RESULTS_WITH_RERANKING = 'sentence_transformers/hybrid_results_with_reranking.json'
 
+HYBRID_RESULTS_WITHOUT_RERANKING = 'sentence_transformers/hybrid_results_without_reranking.json'
+
+TOP_K_CONTEXTUAL_RETRIEVAL = 7
+
+PYSERINI_TOP_K_RETRIEVAL = 3
 
 RETRIES_MAXED_FILE_PATH = 'sentence_transformers/retries_maxed_hotspotQA.json'
 
 MAX_RETRIES = 5
 
+TOP_K_RANK = 20
 
 MAX_ITERATIONS = 3
 
@@ -137,3 +149,11 @@ INPUT_DATA = 'input.json'
 
 INVALID_JSON_FORMAT_PROMPT = 'Response is not a valid json. Please ensure your response strictly follows the output format.'
 
+PYSERINI_INDEX_FILE_DOX = f'pyserini/index'
+
+BAA_BASE = 'BAAI/bge-base-en-v1.5'
+BAA_M3 = "BAAI/bge-m3"
+
+BAA_BASE_RERANKER = 'BAAI/bge-reranker-base'
+
+BAA_M3_RERANKER = 'BAAI/bge-reranker-v2-m3'

@@ -99,20 +99,26 @@ def convert_to_json_l_file(input_json_path, dest_path, dest_files_prefix):
 
 
 
-def convert_to_json(train_data_path, input_json_path, test_path):
+def convert_to_json(train_data_path, input_json_path, train_json_path, test_json_path):
     df = pl.read_ipc_stream(train_data_path)
 
     test_df = df.filter(pl.col("level") == "hard").sample(n=200, seed=42)    
 
-    train_df = df
+    train_df = df.filter(~pl.col("id").is_in(test_df.get_column("id")))
+
+    input_df = df
 
     
     with open(input_json_path, 'w', encoding='utf-8') as f:
-        json.dump(train_df.to_dicts(), f, ensure_ascii=False, indent=2)
+        json.dump(input_df.to_dicts(), f, ensure_ascii=False, indent=2)
+
+    
+    # with open(train_json_path, 'w', encoding='utf-8') as f:
+    #     json.dump(train_df.to_dicts(), f, ensure_ascii=False, indent=2)
     
     
-    with open(test_path, 'w', encoding='utf-8') as f:
-        json.dump(test_df.to_dicts(), f, ensure_ascii=False, indent=2)
+    # with open(test_json_path, 'w', encoding='utf-8') as f:
+    #     json.dump(test_df.to_dicts(), f, ensure_ascii=False, indent=2)
     
 
         
@@ -122,15 +128,17 @@ INPUT_ARROW_PATH = 'data-00000-of-00002.arrow'
 
 INPUT_JSON_PATH = 'input.json'
 
-TEST_PATH = 'test.json' 
+TEST_JSON_PATH = 'test.json' 
+
+TRAIN_JSON_PATH = 'train.json'
 
 JSON_L_DOCS_PATH = 'json_l_docs'
 
 JSON_L_FILES_PREFIX = 'doc_'
 
-convert_to_json(INPUT_ARROW_PATH, INPUT_JSON_PATH, TEST_PATH)
+convert_to_json(INPUT_ARROW_PATH, INPUT_JSON_PATH,  TRAIN_JSON_PATH, TEST_JSON_PATH)
 
-convert_to_json_l_file(INPUT_JSON_PATH, JSON_L_DOCS_PATH, JSON_L_FILES_PREFIX)
+# convert_to_json_l_file(INPUT_JSON_PATH, JSON_L_DOCS_PATH, JSON_L_FILES_PREFIX)
 
 
 

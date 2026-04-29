@@ -12,3 +12,7 @@ sentence_transformers/data_and_embeddings/* filter=lfs diff=lfs merge=lfs -text
 baseline/retries_maxed_hotspotQA.json filter=lfs diff=lfs merge=lfs -text
 baseline/results/* filter=lfs diff=lfs merge=lfs -text
 sentence_transformers/chromadb/5d768e72-be7e-41bc-839a-f1b29b91ee4d/* filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/hybrid_results_with_reranking.json filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/hybrid_results_without_reranking.json filter=lfs diff=lfs merge=lfs -text
+sentence_transformers/chromadb/72ab2961-e2ea-4763-aacf-ac0e047f61ca/* filter=lfs diff=lfs merge=lfs -text
+train.json filter=lfs diff=lfs merge=lfs -text

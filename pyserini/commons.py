@@ -46,6 +46,7 @@ output must be strictly in the following format {json.dumps(output, ensure_ascii
         Do not invent titles and sentence ids.
     -You must provide all the titles and sentence ids that are needed to reason and answer the question.
      Do not leave any.
+    -Looking just at the facts we must be able to answer the question with zero doubtfulness.
 'context_needed':
     - You must use this field to identify any missing information that is needed to answer the question 
         when the provided context is insufficient.
@@ -105,7 +106,7 @@ def get_no_answer_in_respone_prompt():
             'provide_answer' field is True. You must honour this strictly.
           """
 
-TOP_K_RETRIEVAL = 2
+TOP_K_RETRIEVAL = 7
 
 
 TEST_DATA_PATH = 'test.json'

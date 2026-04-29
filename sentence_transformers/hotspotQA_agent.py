@@ -1,7 +1,6 @@
 import chromadb
 from sentence_transformers import SentenceTransformer
 import json
-from pathlib import Path
 import commons
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
@@ -9,18 +8,22 @@ import json
 from typing import Annotated
 from operator import add
 import commons
-from pyserini.search.lucene import LuceneSearcher
 import json
 from langchain_openrouter import ChatOpenRouter
-from pydantic import SecretStr
-import polars as pl 
 import os
 from datetime import timedelta
 import time
+from pydantic import BaseModel, ValidationError
+
+
+class LLMResponse(BaseModel):
+    answer : str = ''
+    supporting_facts : dict[str, list[str]] = {}
+    context_needed : list[str] = [] 
 
 
 
-class BGEQueryEmbeddingFunction(chromadb.EmbeddingFunction):
+class BGEQueryEmbeddingFunction():
     def __init__(self, model):
         self.model = model
 
@@ -35,12 +38,6 @@ class BGEQueryEmbeddingFunction(chromadb.EmbeddingFunction):
             normalize_embeddings=True
         ).tolist()
 
-
-
-
-
-with open(commons.TEST_DATA_PATH, 'r', encoding='utf-8') as fp:
-    hotspotQA_test_data = json.load(fp) 
 
 
 class HotSpotQA(TypedDict):
@@ -65,16 +62,27 @@ class HotSpotQA(TypedDict):
     iteration : int
     response_proper : bool
 
+def build_sentences_id(title_sentences_map):
+    sentence_id = 0
+    title_with_sentence_id_map = {}
+    for title, sentences in title_sentences_map.items():
+        if title not in title_with_sentence_id_map:
+            title_with_sentence_id_map[title] = {}
+        
+        for sentence in sentences:
+            sentence_id_str = f'{sentence_id}'
+            title_with_sentence_id_map[title][sentence_id_str] = sentence
+            sentence_id+=1
+    
+    return title_with_sentence_id_map
 
-def build_context(queries):
+
+def build_context(prev_context, queries):
 
     embeddings = model(queries)
-    res = collection.query(query_embeddings=embeddings, n_results=commons.TOP_K_RETRIEVAL)
-
-    title_sentences_map = {}
-
+    res = collection.query(query_embeddings=embeddings, n_results=commons.TOP_K_CONTEXTUAL_RETRIEVAL)
     if res['documents'] is None or res['metadatas'] is None:
-        return title_sentences_map
+        return prev_context
     
     for query_docs, query_metas in zip(res['documents'], res['metadatas']):
         for doc, query_meta in zip(query_docs, query_metas):
@@ -82,15 +90,13 @@ def build_context(queries):
             title = query_meta['title']
 
             sentences = doc.split('\n')
-           
-            sentence_id_map = {}
-            for indx,sentence in enumerate(sentences):
-                sentence_id = f'{indx}'
-                sentence_id_map[sentence_id] = sentence
             
-            title_sentences_map[title] = sentence_id_map
+            if title not in prev_context:
+                prev_context[title] = set()
+          
+            prev_context[title].update(set(sentences))
     
-    return title_sentences_map
+    return build_sentences_id(prev_context)
 
 def get_supporting_facts(supporting_facts, actual_context):
     titles = supporting_facts['title']
@@ -120,74 +126,74 @@ def query_llm(state:HotSpotQA):
     res = llm.invoke(message)
     return {'raw_response':res.content}
 
+def is_answer_provided(answer):
+    return not (answer.strip() == '' or  answer.lower() == 'null' or answer.lower() == 'none')
+
 
 def validate_response(state:HotSpotQA):
-   
     try:
-        json_response = json.loads(state['raw_response'])
-    except json.JSONDecodeError:
+        response = LLMResponse.model_validate_json(state['raw_response'])
+    except ValidationError:
         return {
             'prev_resp_comments': [commons.INVALID_JSON_FORMAT_PROMPT],
-            'retry_count': state['retry_count'] + 1
+            'retry_count': state['retry_count'] + 1,
+            'response_proper' : False
             }
     
-    updated_supporting_facts = {}
-    if 'supporting_facts' in json_response:
-        supporting_facts = json_response['supporting_facts']
-        
-        for title, sentence_ids in supporting_facts.items():
-            str_sentence_ids = [f'{id}' if not isinstance(id, str) else id for id in sentence_ids]
-            updated_supporting_facts[title] = str_sentence_ids
+   
+    for title, sentence_ids in response.supporting_facts.items():
+        if title not in state['context']:
+            return {
+                'prev_resp_comments': [commons.get_invalid_titles_prompt(title)],
+                'retry_count': state['retry_count'] + 1,
+                'response_proper' : False
+            }
+        invalid_sentence_ids = set(sentence_ids) - set(state['context'][title].keys())
+        if len(invalid_sentence_ids) > 0:
+            return {
+                'prev_resp_comments': [commons.get_invalid_sentence_ids_prompt(title, invalid_sentence_ids)],
+                'retry_count': state['retry_count'] + 1,
+                'response_proper' : False
+            }
 
-
-        for title, sentence_ids in updated_supporting_facts.items():
-            if title not in state['context']:
-                return {
-                    'prev_resp_comments': [commons.get_invalid_titles_prompt(title)],
-                    'retry_count': state['retry_count'] + 1,
-                    'response_proper' : False
-                }
-            invalid_sentence_ids = set(sentence_ids) - set(state['context'][title].keys())
-            if len(invalid_sentence_ids) > 0:
-                return {
-                    'prev_resp_comments': [commons.get_invalid_sentence_ids_prompt(title, invalid_sentence_ids)],
-                    'retry_count': state['retry_count'] + 1,
-                    'response_proper' : False
-                }
-    
     if state['provide_answer']:
-        if 'answer'not in json_response or json_response['answer'].strip() == '' or  json_response['answer'] is None or json_response['answer'] == 'null' or json_response['answer'].lower() == 'none':
+        if not is_answer_provided(response.answer):
             return {
                 'prev_resp_comments': [commons.get_no_answer_in_respone_prompt()],
                 'retry_count': state['retry_count'] + 1,
                 'response_proper' : False
             }
-        return {'pred_answer': json_response['answer'],'pred_supporting_facts':updated_supporting_facts, 'response_proper' : True}
+        return {'pred_answer': response.answer,'pred_supporting_facts':response.supporting_facts, 'response_proper' : True}
     
-    if 'context_needed' in json_response and isinstance(json_response['context_needed'], list):
-        return {'pred_supporting_facts':updated_supporting_facts, 'context_needed': json_response['context_needed'], 'response_proper' : True}
-    
-    return {'pred_supporting_facts':updated_supporting_facts, 'response_proper' : True}
+
+    if is_answer_provided(response.answer) and not response.context_needed:
+        return  {'pred_supporting_facts':response.supporting_facts, 'pred_answer': response.answer, 'response_proper' : True}
+
+
+    return {'pred_supporting_facts':response.supporting_facts, 'context_needed': response.context_needed,'response_proper' : True}
 
 def update_context(state:HotSpotQA):
-
-    context_needed = state['context_needed']
-    new_context = {}
-    if context_needed:
-        new_context = build_context(context_needed)
-
+    
+    prev_context = {}
     prev_supporting_facts = state['pred_supporting_facts']
     context = state['context']
     
     for title, sentence_ids in prev_supporting_facts.items():
         sentences = context[title]
-        new_sentences = {sentence_id:sentences[sentence_id] for sentence_id in sentence_ids}
-        if title in new_context:
-            new_context[title].update(new_sentences)
-        else:
-            new_context[title] = new_sentences
+        new_sentences = {sentences[sentence_id] for sentence_id in sentence_ids}
+        if title not in prev_context:
+            prev_context[title] = set()
+       
+        prev_context[title].update(new_sentences)
 
-    return {'context': new_context}
+    context_needed = state['context_needed']
+    
+    if context_needed:
+        updated_context = build_context(prev_context, context_needed)
+    else:
+        updated_context = build_sentences_id(prev_context)
+   
+    return {'context': updated_context}
 
 
 def is_reponse_proper(state:HotSpotQA):
@@ -226,20 +232,21 @@ def check_state(state:HotSpotQA):
 def convert_sent_ids_to_sentence(state:HotSpotQA):
     pred_supporting_facts = state['pred_supporting_facts']
     converted_prediction_map = {}
-    for title, sentences_id in pred_supporting_facts.items():
-        pred_sentences = []
-        sentences = state['context'][title]
-        for sentence_id in sentences_id:
-            sentence = sentences[sentence_id]
-            pred_sentences.append(sentence)
-        converted_prediction_map[title] = pred_sentences
+    for title, pred_sentences_id in pred_supporting_facts.items():
+        if title in state['context']:
+            pred_sentences = []
+            actual_sentences = state['context'][title]
+            for pred_sentence_id in pred_sentences_id:
+                if pred_sentence_id in actual_sentences:
+                    pred_sentences.append(actual_sentences[pred_sentence_id])
+            converted_prediction_map[title] = pred_sentences
 
     return {'pred_supporting_facts': converted_prediction_map}
 
 
 
 
-def run_with_sentence_transformers():
+def run_with_sentence_transformers(hotspotQA_test_data):
 
     graph = StateGraph(HotSpotQA)
     graph.add_node('query', query_llm)
@@ -257,21 +264,21 @@ def run_with_sentence_transformers():
     graph.add_edge('query', 'validate_response')
 
 
-
     graph.add_conditional_edges('validate_response', is_reponse_proper, {
         'retry':'query','retry_maxed':'write_retries_maxed_hotspotQA_to_file',
-        'response_proper':'add_query_context'
+        'response_proper':'move_state_fwd'
         }
     )
 
-    graph.add_edge('add_query_context', 'move_state_fwd')
 
     graph.add_conditional_edges('move_state_fwd', check_state, {
-        'query':'query','end':'convert_sent_ids_to_sentence'
+        'query':'add_query_context','end':'convert_sent_ids_to_sentence'
         }
     )
 
-    graph.add_edge('write_retries_maxed_hotspotQA_to_file', END)
+    graph.add_edge('add_query_context', 'query')
+
+    graph.add_edge('write_retries_maxed_hotspotQA_to_file', 'convert_sent_ids_to_sentence')
 
     graph.add_edge('convert_sent_ids_to_sentence', END)
 
@@ -285,13 +292,13 @@ def run_with_sentence_transformers():
     
     n = len(hotspotQA_test_data)
    
-    print('running pyserini based QA')
+    print('running sentence transformers based QA')
     observations = []
     for indx, test_data in enumerate(hotspotQA_test_data):
         start = time.perf_counter()
         state : HotSpotQA = {
             'question' : test_data['question'],
-            'context': build_context([test_data['question']]),
+            'context': build_context({}, [test_data['question']]),
             'actual_answer' : test_data['answer'],
             'actual_supporting_facts': get_supporting_facts(test_data['supporting_facts'], test_data['context']),
             'prev_resp_comments' : [],
@@ -347,18 +354,22 @@ def run_with_sentence_transformers():
         json.dump(observations, f, ensure_ascii=False, indent=2)
 
 
+if __name__ == '__main__':
 
-api_key = os.getenv('OPEN-ROUTER-API-KEY')
+    api_key = os.getenv('OPEN-ROUTER-API-KEY')
 
-llm = ChatOpenRouter(
-  model="qwen/qwen3-32b",
-  api_key=api_key, # type: ignore
-  temperature=0
-)
+    llm = ChatOpenRouter(
+    model="qwen/qwen3-32b",
+    api_key=api_key, # type: ignore
+    temperature=0
+    )
 
-client = chromadb.PersistentClient(path=commons.CHROMADB_PATH)
+    client = chromadb.PersistentClient(path=commons.CHROMADB_PATH)
 
-model = BGEQueryEmbeddingFunction(SentenceTransformer("BAAI/bge-base-en", device='cuda'))
-collection = client.get_or_create_collection(name=commons.CHROMADB_COLLECTION_NAME)
+    model = BGEQueryEmbeddingFunction(SentenceTransformer(commons.BAA_BASE, device='cuda', local_files_only=True))
+    collection = client.get_or_create_collection(name=commons.CHROMADB_COLLECTION_NAME)
 
-run_with_sentence_transformers()
+    with open(commons.TEST_DATA_PATH, 'r', encoding='utf-8') as fp:
+        hotspotQA_test_data = json.load(fp) 
+
+    run_with_sentence_transformers(hotspotQA_test_data)

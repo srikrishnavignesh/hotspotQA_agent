@@ -4,12 +4,8 @@ import json
 import os
 import numpy as np
 from tqdm import tqdm
-import nltk
 import torch
 import commons
-
-nltk.download('punkt_tab')
-
 
 
 def ingest_data_and_embeddings_to_chromadb(data_and_embed_doc_paths, collection, batch_size=64):
@@ -70,25 +66,15 @@ def ingest_data_and_embeddings_to_chromadb(data_and_embed_doc_paths, collection,
 def get_no_of_words(s):
     return len(s.split())
 
-def create_parts(sentences, max_words):
-    sentence_parts, sentence_ids, words_num = [], [], []
+def get_word_freq(sentences):
+    words_num = []
     for indx, sentence in enumerate(sentences):
-        sentence_id = indx
         total_words = get_no_of_words(sentence)
-        if total_words > max_words:
-            sub_sentences = nltk.sent_tokenize(sentence)
-            for sub_sentence in sub_sentences:
-                words_num.append(get_no_of_words(sub_sentence))
-                sentence_parts.append(sub_sentence)
-                sentence_ids.append(sentence_id)
-        else:
-            words_num.append(total_words)
-            sentence_parts.append(sentence)
-            sentence_ids.append(sentence_id)
+        words_num.append(total_words)
 
-    return sentence_parts, sentence_ids, words_num
+    return  words_num
 
-model = SentenceTransformer("BAAI/bge-base-en", device='cuda')
+
 
 
 class BGEEmbeddingFunction():
@@ -109,15 +95,14 @@ class BGEEmbeddingFunction():
                 convert_to_numpy=True
             )
 
-model.half()
 
-def create_data_and_embeddings_from_jsonl(file_id_to_path_map, dest_dir, data_file_prefix, embed_doc_file_prefix, batch_size=3500):
+
+def create_data_and_embeddings_from_jsonl(embedder, file_id_to_path_map, dest_dir, data_file_prefix, 
+                                          embed_doc_file_prefix, batch_size=3500, overlap=1):
 
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    embedder = BGEEmbeddingFunction(model, batch_size)
-
-    MAX_WORDS = model.max_seq_length // 1.5  # type: ignore
+    MAX_WORDS = 400 
  
     for indx, file_path in file_id_to_path_map.items():
         with open(file_path, "r", encoding="utf-8") as f:
@@ -125,7 +110,7 @@ def create_data_and_embeddings_from_jsonl(file_id_to_path_map, dest_dir, data_fi
         
         chunks_meta = []
         embeddings = []
-        chunks = []
+        chunks_for_embed = []
         
         for line in tqdm(lines, desc='processing_lines'):
             data = json.loads(line)
@@ -134,10 +119,11 @@ def create_data_and_embeddings_from_jsonl(file_id_to_path_map, dest_dir, data_fi
             text = data["contents"]
             sentences = text.split('\n')
 
-            sentence_parts, sentence_ids, words_num = create_parts(sentences, MAX_WORDS)
+            words_num = get_word_freq(sentences)
 
             s = 0
-            while s < len(sentence_parts):
+            added_till = -1
+            while s < len(sentences):
                 
                 e = s+1
                 sum_words = words_num[s]
@@ -145,27 +131,33 @@ def create_data_and_embeddings_from_jsonl(file_id_to_path_map, dest_dir, data_fi
                     sum_words += words_num[e]
                     e+=1
                 
-                chunk = ''.join(sentence_parts[s:e])
-
-                current_chunk_sentences = '\n'.join([sentences[i] for i in sorted(list(set(sentence_ids[s:e])))])
-            
-                chunk_text_with_title = f"title: {title}\n passage:{chunk}"
-
-                chunk_id = f"{title}_{s}"
-
-                chunks_meta.append({'id' : chunk_id, 'title' : title, 'chunk':current_chunk_sentences})
+                if e > added_till:
+                    
+                    chunk_for_retrieval = '\n'.join(sentences[s:e])
                 
-                chunks.append(chunk_text_with_title)
+                    chunk_for_embed = f"title: {title}\n passage:{''.join(sentences[s:e])}"
 
-                if len(chunks) == batch_size:
-                    embeddings.extend(embedder(chunks))
-                    chunks = []
+                    chunk_id = f"{title}_{s}"
+
+                    chunks_meta.append({'id' : chunk_id, 'title' : title, 'chunk':chunk_for_retrieval})
+                    
+                    chunks_for_embed.append(chunk_for_embed)
+
+                    if len(chunks_for_embed) == batch_size:
+                        embeddings.extend(embedder(chunks_for_embed))
+                        chunks_for_embed = []
                 
-                s = e
+                if e == len(sentences):
+                    s = e
+                elif  e - s > overlap:
+                    s = e - overlap
+                    added_till = e-1
+                else:
+                    s+=1
+                    added_till = e-1
 
-
-        if len(chunks):
-            embeddings.extend(embedder(chunks))
+        if len(chunks_for_embed):
+            embeddings.extend(embedder(chunks_for_embed))
 
 
         with open(f'{dest_dir}/{data_file_prefix}{indx}.json', 'w', encoding='utf-8') as f:
@@ -175,7 +167,8 @@ def create_data_and_embeddings_from_jsonl(file_id_to_path_map, dest_dir, data_fi
 
 
 #input must be jsonl files
-def insert_vectors_to_chromadb():
+def insert_vectors_to_chromadb(embedder):
+
 
     dest_dir='sentence_transformers/data_and_embeddings'
 
@@ -190,21 +183,34 @@ def insert_vectors_to_chromadb():
 
     file_id_to_path_map = {counter:f'{docs_src_dir}/{docs_file_prefix}{counter}.jsonl' for counter in range(1, docs_count+1)}  
     
-    # create_data_and_embeddings_from_jsonl(file_id_to_path_map, dest_dir, data_file_prefix, embed_doc_file_prefix)
+    # create_data_and_embeddings_from_jsonl(embedder, file_id_to_path_map, dest_dir, data_file_prefix, embed_doc_file_prefix)
     
     client = chromadb.PersistentClient(path=commons.CHROMADB_PATH)
     collection = client.get_or_create_collection(name=commons.CHROMADB_COLLECTION_NAME)
 
 
     data_and_embed_doc_paths = []
-    for id in range(1, docs_count+1):
+    for id in range(1, 3):
         data_file_path = f'{dest_dir}/{data_file_prefix}{id}.json'
         embed_doc_file_path = f'{dest_dir}/{embed_doc_file_prefix}{id}.npy'
         data_and_embed_doc_paths.append((data_file_path, embed_doc_file_path))
 
     ingest_data_and_embeddings_to_chromadb(data_and_embed_doc_paths, collection, batch_size=5000)
 
-insert_vectors_to_chromadb()
+
+if __name__ == '__main__':
+
+    model = SentenceTransformer(commons.BAA_BASE, device='cuda')
+
+    model.max_seq_length = 512
+
+    model.half()
+
+    batch_size = 3500
+    embedder = BGEEmbeddingFunction(model, batch_size)
+
+
+    insert_vectors_to_chromadb(embedder)
 
 
 

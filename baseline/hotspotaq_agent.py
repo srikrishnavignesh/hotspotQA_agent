@@ -10,11 +10,15 @@ from operator import add
 import os
 import time
 from datetime import timedelta
+from pydantic import BaseModel, ValidationError
 
-with open(commons.TEST_DATA_PATH, 'r', encoding='utf-8') as fp:
-    hotspotQA_train_data = json.load(fp) 
 
-                          
+class LLMResponse(BaseModel):
+    answer : str = ''
+    supporting_facts : dict[str, list[str]] = {}
+    context_needed : list[str] = [] 
+
+                       
 class HotSpotQA(TypedDict):
     question : str
     context : dict[str, dict[str, str]]
@@ -23,8 +27,6 @@ class HotSpotQA(TypedDict):
     actual_answer:str
     actual_supporting_facts: dict[str, list]
     
-    resp_answer:str
-    resp_supporting_facts: dict[str, list]
     raw_response:str
     retry_count:int
     
@@ -34,6 +36,12 @@ class HotSpotQA(TypedDict):
     provide_answer: bool
 
     question_id: str
+
+    response_proper : bool
+
+    iteration : int
+
+    max_iteration : int
 
 
 def get_context(context):
@@ -87,77 +95,67 @@ def query_llm_with_no_context(state:HotSpotQA):
     return {'raw_response':res.content}
 
 
-def validate_supporting_facts(state:HotSpotQA):
+def is_answer_provided(answer):
+    return not (answer.strip() == '' or  answer.lower() == 'null' or answer.lower() == 'none')
+
+
+def validate_response(state:HotSpotQA):
     try:
-        json_response = json.loads(state['raw_response'])
-    except json.JSONDecodeError:
+        response = LLMResponse.model_validate_json(state['raw_response'])
+    except ValidationError:
         return {
             'prev_resp_comments': [commons.INVALID_JSON_FORMAT_PROMPT],
-            'retry_count': state['retry_count'] + 1
+            'retry_count': state['retry_count'] + 1,
+            'response_proper' : False
             }
     
-    supporting_facts = json_response['supporting_facts']
-    
-    updated_supporting_facts = {}
-    for title, sentence_ids in supporting_facts.items():
-        str_sentence_ids = [f'{id}' if not isinstance(id, str) else id for id in sentence_ids]
-        updated_supporting_facts[title] = str_sentence_ids
-
-
-    for title, sentence_ids in updated_supporting_facts.items():
+   
+    for title, sentence_ids in response.supporting_facts.items():
         if title not in state['context']:
             return {
                 'prev_resp_comments': [commons.get_invalid_titles_prompt(title)],
-                'retry_count': state['retry_count'] + 1
+                'retry_count': state['retry_count'] + 1,
+                'response_proper' : False
             }
         invalid_sentence_ids = set(sentence_ids) - set(state['context'][title].keys())
         if len(invalid_sentence_ids) > 0:
             return {
                 'prev_resp_comments': [commons.get_invalid_sentence_ids_prompt(title, invalid_sentence_ids)],
-                'retry_count': state['retry_count'] + 1
+                'retry_count': state['retry_count'] + 1,
+                'response_proper' : False
             }
-        
-    return {'pred_supporting_facts':updated_supporting_facts}
 
-def update_context_with_prev_supporting_facts(state:HotSpotQA):
+    if state['provide_answer']:
+        if not is_answer_provided(response.answer):
+            return {
+                'prev_resp_comments': [commons.get_no_answer_in_respone_prompt()],
+                'retry_count': state['retry_count'] + 1,
+                'response_proper' : False
+            }
+        return {'pred_answer': response.answer,'pred_supporting_facts':response.supporting_facts, 'response_proper' : True}
+    
+
+    if is_answer_provided(response.answer) and not response.context_needed:
+        return  {'pred_supporting_facts':response.supporting_facts, 'pred_answer': response.answer, 'response_proper' : True}
+
+    return {'pred_supporting_facts':response.supporting_facts, 'context_needed': response.context_needed,'response_proper' : True}
+
+
+def update_context(state:HotSpotQA):
     prev_supporting_facts = state['pred_supporting_facts']
     context = state['context']
-    new_context = {}
+    updated_context = {}
     for title, sentence_ids in prev_supporting_facts.items():
         sentences = context[title]
         new_sentences = {sentence_id:sentences[sentence_id] for sentence_id in sentence_ids}  
-        new_context[title] = new_sentences
+        updated_context[title] = new_sentences
     
-    return {'context': new_context, 'provide_answer': True}
+    return {'context': updated_context}
 
-def validate_answer(state:HotSpotQA):
-    try:
-        json_response = json.loads(state['raw_response'])
-    except json.JSONDecodeError:
-        return {
-            'prev_resp_comments': [commons.INVALID_JSON_FORMAT_PROMPT],
-            'retry_count': state['retry_count'] + 1
-            }
-    
-    pred_answer = json_response['answer']
-    if pred_answer is None or pred_answer.strip() == ''  or pred_answer.lower() == 'none' or pred_answer.lower() == 'null':
-        return {
-            'prev_resp_comments': [commons.get_no_answer_in_respone_prompt()],
-            'retry_count': state['retry_count'] + 1
-        }
-    return {'pred_answer': pred_answer, 'prev_resp_comments':[]}
 
-def check_answer(state:HotSpotQA):
-        if state['pred_answer'] != '':
-            return 'end'
-        if state['retry_count'] == commons.MAX_RETRIES:
-            return 'retry_maxed'
-        return 'retry'
-    
-
-def check_for_supporting_facts(state:HotSpotQA):
-    if len(state['pred_supporting_facts']) > 0:
-        return 'end'
+def is_reponse_proper(state:HotSpotQA):
+    if state['response_proper']:
+        return 'response_proper'
     if state['retry_count'] == commons.MAX_RETRIES:
         return 'retry_maxed'
     return 'retry'
@@ -176,248 +174,76 @@ def write_retries_maxed_hotspotQA_to_file(state:HotSpotQA):
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump([state], f, indent=4)
 
+def move_state_fwd(state:HotSpotQA):
+    if state['iteration'] + 1 == state['max_iteration']:
+        return {'iteration':state['iteration']+1, 'provide_answer': True}
+    return {'iteration':state['iteration']+1}
+
+
+def check_state(state:HotSpotQA):
+    if state['iteration'] > state['max_iteration']:
+        return 'end'
+    else:
+        return 'query'
+
 
 def convert_sent_ids_to_sentence(state:HotSpotQA):
     pred_supporting_facts = state['pred_supporting_facts']
     converted_prediction_map = {}
-    for title, sentences_id in pred_supporting_facts.items():
-        pred_sentences = []
-        sentences = state['context'][title]
-        for sentence_id in sentences_id:
-            sentence = sentences[sentence_id]
-            pred_sentences.append(sentence)
-        converted_prediction_map[title] = pred_sentences
+    for title, pred_sentences_id in pred_supporting_facts.items():
+        if title in state['context']:
+            pred_sentences = []
+            actual_sentences = state['context'][title]
+            for pred_sentence_id in pred_sentences_id:
+                if pred_sentence_id in actual_sentences:
+                    pred_sentences.append(actual_sentences[pred_sentence_id])
+            converted_prediction_map[title] = pred_sentences
 
     return {'pred_supporting_facts': converted_prediction_map}
-
-
-
-def run_single_hop():
-
-    graph = StateGraph(HotSpotQA)
-    graph.add_node('get_answer', query_llm)
-    graph.add_node('validate_supporting_facts', validate_supporting_facts)
-    graph.add_node('write_retries_maxed_hotspotQA_to_file', write_retries_maxed_hotspotQA_to_file)
-    graph.add_node('validate_answer', validate_answer)
-
-    graph.add_node('convert_ids_to_sentences', convert_sent_ids_to_sentence)
-
-    graph.set_entry_point('get_answer')
-    graph.add_edge('get_answer', 'validate_supporting_facts')
-    graph.add_edge('write_retries_maxed_hotspotQA_to_file', END)
-
-  
-   
-
-
-    graph.add_conditional_edges('validate_supporting_facts',check_for_supporting_facts, {
-        'retry':'get_answer','retry_maxed':'write_retries_maxed_hotspotQA_to_file','end': 'validate_answer'}
-        )
-    
-    graph.add_conditional_edges('validate_answer', check_answer, {
-        'retry': 'get_answer',
-        'retry_maxed': 'write_retries_maxed_hotspotQA_to_file',
-        'end': 'convert_ids_to_sentences'
-    })
-
-    graph.add_edge('convert_ids_to_sentences', END)
-
-    app = graph.compile()
-
-    answers_matched = 0
-    supporting_facts_keys_matched = 0
-    time_sum = timedelta(seconds=0)
-    retry_sum = 0
-    n = len(hotspotQA_train_data)
-    observations = []
-
-    print('running single hop')
-    for indx, train_data in enumerate(hotspotQA_train_data):
-        
-        start = time.perf_counter()
-        state : HotSpotQA = {
-            'question' : train_data['question'],
-            'context': get_context(train_data['context']),
-            'actual_answer' : train_data['answer'],
-            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts'], train_data['context']),
-            'prev_resp_comments' : [],
-            'resp_answer': '',
-            'resp_supporting_facts': {},
-            'raw_response':'',
-            'retry_count': 0,
-            'pred_answer': '',
-            'pred_supporting_facts' : {},
-            'provide_answer': True,
-            'question_id': train_data['id']
-        }
-
-        res = app.invoke(state)
-        end = time.perf_counter()
-
-        matched = False
-        if res['pred_answer'].lower() == res['actual_answer'].lower():
-            answers_matched+=1
-            matched = True
-        
-        if res['pred_supporting_facts'].keys() == res['actual_supporting_facts'].keys():
-            supporting_facts_keys_matched+=1
-    
-           
-        observation =  {'index':indx, 'question_id': res['question_id'], 'actual_answer' : res['actual_answer'], 
-                        'pred_answer' : res['pred_answer'], 'actual_supporting_facts': res['actual_supporting_facts'], 
-                        'pred_supporting_facts': res['pred_supporting_facts'], 'matched':matched
-                        }
-        
-        observations.append(observation)
-        
-        print(observation)
-
-        delta = timedelta(seconds=(end - start))
-        time_sum += delta
-
-        retry_sum+=state['retry_count']
-    
-
-    metrics = {'metrics': 
-            {
-                'n' : n, 'exact_matched_answers' : answers_matched,
-                'exact_matched_doc_keys' : supporting_facts_keys_matched,
-                'avg_time_in_seconds' : time_sum.total_seconds() / n, 'retry_count' : retry_sum / n,
-                'total_time_taken_in_seconds' : time_sum.total_seconds(),'total_retry_count' : retry_sum
-            }
-            }
-
-    
-    print(metrics)
-
-    observations.append(metrics)
-    with open(commons.SINGLE_HOP_RESULTS_FILE_PATH, 'w', encoding='utf-8') as f:
-        json.dump(observations, f, ensure_ascii=False, indent=2)
             
 
-def run_multi_hop():
+def run_hops(max_iteration, result_path, use_context):
 
     graph = StateGraph(HotSpotQA)
-    graph.add_node('get_context_for_reasoning', query_llm)
-    graph.add_node('validate_supporting_facts', validate_supporting_facts)
+
+    if use_context:
+        graph.add_node('query', query_llm)
+    else:
+        graph.add_node('query', query_llm_with_no_context)
+
+    graph.add_node('validate_response', validate_response)
+    graph.add_node('add_query_context', update_context)
+    graph.add_node('convert_sent_ids_to_sentence', convert_sent_ids_to_sentence)
+
+
+    graph.add_node('move_state_fwd', move_state_fwd)
+
     graph.add_node('write_retries_maxed_hotspotQA_to_file', write_retries_maxed_hotspotQA_to_file)
-    graph.add_node('update_context_with_prev_supporting_facts', update_context_with_prev_supporting_facts)
-    graph.add_node('validate_answer', validate_answer)
     
-    graph.add_node('get_answer', query_llm)
+    graph.set_entry_point('query')
 
-    graph.add_node('convert_ids_to_sentences', convert_sent_ids_to_sentence)
-
-    graph.set_entry_point('get_context_for_reasoning')
-    graph.add_edge('get_context_for_reasoning', 'validate_supporting_facts')
-    graph.add_edge('update_context_with_prev_supporting_facts', 'get_answer')
-    graph.add_edge('get_answer', 'validate_answer')
-
-    graph.add_edge('write_retries_maxed_hotspotQA_to_file', END)
+    graph.add_edge('query', 'validate_response')
 
 
-    graph.add_conditional_edges('validate_supporting_facts', check_for_supporting_facts, {
-        'retry':'get_context_for_reasoning','retry_maxed':'write_retries_maxed_hotspotQA_to_file',
-        'end':'update_context_with_prev_supporting_facts'
+    graph.add_conditional_edges('validate_response', is_reponse_proper, {
+        'retry':'query','retry_maxed':'write_retries_maxed_hotspotQA_to_file',
+        'response_proper':'move_state_fwd'
         }
     )
 
-    
-    graph.add_conditional_edges('validate_answer', check_answer, {
-        'retry': 'get_answer',
-        'retry_maxed': 'write_retries_maxed_hotspotQA_to_file',
-        'end': 'convert_ids_to_sentences'
-    })
 
-    graph.add_edge('convert_ids_to_sentences', END)
-
-    app = graph.compile()
-
-    answers_matched = 0
-    supporting_facts_keys_matched = 0
-    time_sum = timedelta(seconds=0)
-    retry_sum = 0
-    n = len(hotspotQA_train_data)
-    observations = []
-    print('running multi hop')
-    for indx,train_data in enumerate(hotspotQA_train_data):
-        start = time.perf_counter()
-        state : HotSpotQA = {
-            'question' : train_data['question'],
-            'context': get_context(train_data['context']),
-            'actual_answer' : train_data['answer'],
-            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts'], train_data['context']),
-            'prev_resp_comments' : [],
-            'resp_answer': '',
-            'resp_supporting_facts': {},
-            'raw_response':'',
-            'retry_count': 0,
-            'pred_answer': '',
-            'pred_supporting_facts' : {},
-            'provide_answer': False,
-            'question_id': train_data['id']
+    graph.add_conditional_edges('move_state_fwd', check_state, {
+        'query':'add_query_context','end':'convert_sent_ids_to_sentence'
         }
+    )
 
-        res = app.invoke(state)
-        end = time.perf_counter()
-        matched = False
-        if res['pred_answer'].lower() == res['actual_answer'].lower():
-            answers_matched+=1
-            matched = True
-        
-        if res['pred_supporting_facts'].keys() == res['actual_supporting_facts'].keys():
-            supporting_facts_keys_matched+=1
-           
-        observation =  {'index' : indx, 'question_id': res['question_id'], 'actual_answer' : res['actual_answer'], 
-                        'pred_answer' : res['pred_answer'], 'actual_supporting_facts': res['actual_supporting_facts'], 
-                        'pred_supporting_facts': res['pred_supporting_facts'], 'matched':matched
-                        }
-        
-        observations.append(observation)
-        
-        print(observation)
+    graph.add_edge('add_query_context', 'query')
 
-        delta = timedelta(seconds=(end - start))
-        time_sum += delta
+    graph.add_edge('write_retries_maxed_hotspotQA_to_file', 'convert_sent_ids_to_sentence')
 
-        retry_sum+=state['retry_count']
-    
-
-    metrics = {'metrics': 
-            {
-                'n' : n, 'exact_matched_answers' : answers_matched,
-                'exact_matched_doc_keys' : supporting_facts_keys_matched,
-                'avg_time_in_seconds' : time_sum.total_seconds() / n, 'retry_count' : retry_sum / n,
-                'total_time_taken_in_seconds' : time_sum.total_seconds(),'total_retry_count' : retry_sum
-            }
-            }
-
-    
-    print(metrics)
-
-    observations.append(metrics)
-    with open(commons.MULTI_HOP_RESULTS_FILE_PATH, 'w', encoding='utf-8') as f:
-        json.dump(observations, f, ensure_ascii=False, indent=2)
-
-def run_single_hop_with_co_context():
-
-    graph = StateGraph(HotSpotQA)
-    graph.add_node('get_answer', query_llm_with_no_context)
-    graph.add_node('write_retries_maxed_hotspotQA_to_file', write_retries_maxed_hotspotQA_to_file)
-    graph.add_node('validate_answer', validate_answer)
-
-    graph.set_entry_point('get_answer')
-    graph.add_edge('get_answer', 'validate_answer')
-    graph.add_edge('write_retries_maxed_hotspotQA_to_file', END)
-   
+    graph.add_edge('convert_sent_ids_to_sentence', END)
 
 
-    graph.add_conditional_edges('validate_answer', check_answer, {
-        'retry': 'get_answer',
-        'retry_maxed': 'write_retries_maxed_hotspotQA_to_file',
-        'end': END
-    })
-    
     app = graph.compile()
 
     answers_matched = 0
@@ -426,24 +252,28 @@ def run_single_hop_with_co_context():
     retry_sum = 0
     n = len(hotspotQA_train_data)
     observations = []
-    print('running single hop with no context')
+    print(f'running hop with iteration {max_iteration} with {use_context}')
     for indx,train_data in enumerate(hotspotQA_train_data):
         start = time.perf_counter()
         state : HotSpotQA = {
             'question' : train_data['question'],
             'context': {},
             'actual_answer' : train_data['answer'],
-            'actual_supporting_facts': {},
+            'actual_supporting_facts': get_supporting_facts(train_data['supporting_facts'], train_data['context']),
             'prev_resp_comments' : [],
-            'resp_answer': '',
-            'resp_supporting_facts': {},
             'raw_response':'',
             'retry_count': 0,
             'pred_answer': '',
             'pred_supporting_facts' : {},
-            'provide_answer': False,
-            'question_id': train_data['id']
+            'question_id': train_data['id'],
+            'iteration' : 1,
+            'max_iteration': max_iteration,
+            'provide_answer': max_iteration == 1,
+            'response_proper' : False
+
         }
+
+        state['context'] = get_context(train_data['context']) if use_context else {}
 
         res = app.invoke(state)
         end = time.perf_counter()
@@ -454,8 +284,7 @@ def run_single_hop_with_co_context():
         
         if res['pred_supporting_facts'].keys() == res['actual_supporting_facts'].keys():
             supporting_facts_keys_matched+=1
-
-        
+           
         observation =  {'index' : indx, 'question_id': res['question_id'], 'actual_answer' : res['actual_answer'], 
                         'pred_answer' : res['pred_answer'], 'actual_supporting_facts': res['actual_supporting_facts'], 
                         'pred_supporting_facts': res['pred_supporting_facts'], 'matched':matched
@@ -472,35 +301,43 @@ def run_single_hop_with_co_context():
     
 
     metrics = {'metrics': 
-            {
-                'n' : n, 'exact_matched_answers' : answers_matched,
-                'exact_matched_doc_keys' : supporting_facts_keys_matched,
-                'avg_time_in_seconds' : time_sum.total_seconds() / n, 'retry_count' : retry_sum / n,
-                'total_time_taken_in_seconds' : time_sum.total_seconds(),'total_retry_count' : retry_sum
-            }
+                {
+                    'n' : n, 'exact_matched_answers' : answers_matched,
+                    'exact_matched_doc_keys' : supporting_facts_keys_matched,
+                    'avg_time_in_seconds' : time_sum.total_seconds() / n, 'retry_count' : retry_sum / n,
+                    'total_time_taken_in_seconds' : time_sum.total_seconds(),'total_retry_count' : retry_sum
+                }
             }
 
     
     print(metrics)
 
     observations.append(metrics)
-    with open(commons.SINGLE_HOP_WITH_NO_CONTEXT_RESULTS_FILE_PATH, 'w', encoding='utf-8') as f:
+
+    with open(result_path, 'w', encoding='utf-8') as f:
         json.dump(observations, f, ensure_ascii=False, indent=2)
 
 
 
-api_key = os.getenv('OPEN-ROUTER-API-KEY')
 
-llm = ChatOpenRouter(
-  model="qwen/qwen3-32b",
-  api_key=api_key, # type: ignore
-  temperature=0
-)
+if __name__ == '__main__':
 
-run_single_hop()
+    with open(commons.TEST_DATA_PATH, 'r', encoding='utf-8') as fp:
+        hotspotQA_train_data = json.load(fp) 
 
 
-run_multi_hop()
+    api_key = os.getenv('OPEN-ROUTER-API-KEY')
+
+    llm = ChatOpenRouter(
+        model="qwen/qwen3-32b",
+        api_key=api_key, # type: ignore
+        temperature=0
+    )
+
+    run_hops(1, commons.SINGLE_HOP_RESULTS_FILE_PATH, True)
 
 
-run_single_hop_with_co_context()
+    run_hops(2, commons.MULTI_HOP_RESULTS_FILE_PATH, True)
+
+
+    run_hops(1, commons.SINGLE_HOP_WITH_NO_CONTEXT_RESULTS_FILE_PATH, False)

@@ -120,13 +120,19 @@ PYSERINI_CONTEXT_WITH_MULTI_HOP = 'pyserini/pyserini_based_query_results.json'
 
 SENTENCE_TRANSFORMERS_MULTI_HOP = 'sentence_transformers/sentence_transformers_based_results.json'
 
+HYBRID_RESULTS_WITH_RERANKING = 'sentence_transformers/hybrid_results_with_reranking.json'
+
+HYBRID_RESULTS_WITHOUT_RERANKING = 'sentence_transformers/hybrid_results_without_reranking.json'
+
 
 
 files = {'single_hop_no_context': SINGLE_HOP_NO_CONTEXT, 
          'single_hop_with_context':SINGLE_HOP_WITH_CONTEXT, 
          'multi_hop_refinement': MULTI_HOP_WITH_CONTEXT, 
          'pyserini_based_multi_hop': PYSERINI_CONTEXT_WITH_MULTI_HOP,
-         'sentence_transformers_multi_hop' : SENTENCE_TRANSFORMERS_MULTI_HOP
+         'sentence_transformers_multi_hop' : SENTENCE_TRANSFORMERS_MULTI_HOP,
+         'hybrid_results_with_reranking': HYBRID_RESULTS_WITH_RERANKING,
+         'hybrid_results_without_reranking' : HYBRID_RESULTS_WITHOUT_RERANKING
          }
 
 for method, file in files.items():
@@ -134,26 +140,6 @@ for method, file in files.items():
         answer_em, answer_f1,supporting_facts_em, supporting_facts_f1 =  get_score(json.load(f))
         print(f"""method:{method} answer_em : {answer_em}, answer_f1 : {answer_f1},  supporting_facts_em : {supporting_facts_em}', 
               supporting_facts_f1 : {supporting_facts_f1}""")
-
-from pathlib import Path
-import polars as pl 
-import os
-
-
-
-
-def write_train_data(train_data_path, distractor_input_json_path, fullwiki_input_json_path):
-    df = pl.read_ipc_stream(train_data_path)
-
-    filtered_df = df.filter(pl.col("level") == "hard").sample(n=200, seed=42)    
-
-    if not os.path.exists(distractor_input_json_path):
-        filtered_df.to_pandas().to_csv(distractor_input_json_path, index=False)
-    
-    if not os.path.exists(fullwiki_input_json_path):
-        filtered_df.to_pandas().to_csv(fullwiki_input_json_path, index=False)
-
-    context = filtered_df['context'].to_list()
 
 
 
